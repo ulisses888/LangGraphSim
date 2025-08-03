@@ -1,68 +1,83 @@
-# agentes.py (Corrigido e com prompts mais robustos)
+# agentes.py (VERSÃO CORRIGIDA)
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.agents import AgentExecutor, create_tool_calling_agent
-from ferramentas import FerramentasSimulacao
-
+from ferramentas import consultar_inventario, fazer_oferta, plantar_semente, aceitar_oferta, rejeitar_oferta, fazer_contra_oferta
 
 def criar_agente(nome_agente: str, role_prompt: str, tools: list, llm: ChatOpenAI):
-    """Cria e retorna um AgentExecutor para um agente específico."""
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", role_prompt),
-        MessagesPlaceholder(variable_name="chat_history", optional=True),
-        ("user", "{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
-    ])
-
+    prompt = ChatPromptTemplate.from_messages(
+        [("system", role_prompt), MessagesPlaceholder(variable_name="chat_history", optional=True), ("user", "{input}"),
+         MessagesPlaceholder(variable_name="agent_scratchpad"), ])
     agent = create_tool_calling_agent(llm, tools, prompt)
     return AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True)
 
+def inicializar_agentes(llm: ChatOpenAI, agricultores_ids: list):
+    """Inicializa os agentes com prompts de negociação."""
 
-def inicializar_agentes(ferramentas_simulacao: FerramentasSimulacao, llm: ChatOpenAI, fazendeiros_ids: list):
-    common_tools = ferramentas_simulacao.as_tool_list()
+    empresario_prompt = """
+    Você é um Empresário. Sua meta é maximizar o lucro.
+    Você é o único fornecedor de todos os itens. Os agricultores farão ofertas para comprar seus produtos.
 
-    # --- PROMPT MELHORADO PARA O EMPRESÁRIO ---
-    empresario_prompt = """Você é um empresário experiente. Seu objetivo é comprar soja pelo menor preço.
+    Tabela de preços (Use estes IDs exatos):
+    - sementes: soja, arroz, hortalica
+    - fertilizantes: fertilizante-comum, fertilizante-premium, fertilizante-super-premium
+    - agrotoxicos: agrotoxico-comum, agrotoxico-premium, agrotoxico-super-premium
+    - maquinas: pacote1, pacote2, pacote3, pulverizador
 
-DIRETIVA PRINCIPAL: Sua tarefa mais importante é reconhecer um acordo. Se o Fazendeiro disser 'aceito', 'concordo', 'fechado' ou uma frase similar, sua PRÓXIMA E ÚNICA AÇÃO deve ser chamar a ferramenta `registrar_transacao`. NÃO continue a negociar. NÃO faça outra oferta. Registre a transação imediatamente.
+    Preços:
+    soja: 30, arroz: 20, hortalica: 10
+    fertilizante-comum: 30, fertilizante-premium: 60, fertilizante-super-premium: 90
+    agrotoxico-comum: 30, agrotoxico-premium: 60, agrotoxico-super-premium: 90
+    pacote1: 30, pacote2: 60, pacote3: 90
+    pulverizador: 400
 
-REGRAS ESTRITAS:
-1. NEGOCIE PREÇOS EXPLICITAMENTE: Sempre mencione valores em R$ por kg ou valor total.
-   Ex: "Ofereço R$14.50 por kg" ou "Posso pagar R$9.000 no total pelos 300kg"
-2. CONFIRME ACEITAÇÃO: Após fazer uma oferta, SEMPRE pergunte explicitamente: "Aceita este preço?"
-3. REGISTRE SOMENTE APÓS ACORDO: Use a ferramenta `registrar_transacao` APENAS APÓS ouvir a confirmação clara do fazendeiro ('aceito', 'concordo', etc.).
-4. FORMATE REGISTRO CORRETAMENTE: Ao chamar a ferramenta, use o formato exato:
-   'Comprador: Empresario, Vendedor: [ID], Item: Soja, Quantidade: [QTD]kg, Preço Total: [VALOR]'
-5. DESISTÊNCIA: Se após 3 ofertas suas não houver acordo, diga "desisto da negociação" como sua resposta final.
+    **REGRAS DE NEGOCIAÇÃO:**
+    1.  **Avalie a Oferta:** Quando um agricultor fizer uma oferta, avalie o `preco_proposto`.
+    2.  **Decida:**
+        - Se o preço for bom (igual ou maior que o preço de tabela), use a ferramenta `aceitar_oferta()`.
+        - Se o preço for muito baixo, use `rejeitar_oferta()`.
+        - Se a oferta for baixa mas negociável, use `fazer_contra_oferta(novo_preco=VALOR)`, propondo um preço mais alto.
+    3.  **Sempre responda usando uma de suas ferramentas.**
+    4.  **IMPORTANTE: Sua resposta deve ser EXATAMENTE UMA chamada de ferramenta. Pare imediatamente após a chamada.**
+    """
+    empresario_tools = [aceitar_oferta, rejeitar_oferta, fazer_contra_oferta]
+    empresario_agent = criar_agente("Empresario", empresario_prompt, empresario_tools, llm)
 
-ETAPAS DA NEGOCIAÇÃO:
-1. Faça ofertas e contrapropostas de forma natural.
-2. Analise a resposta do fazendeiro. Se for um acordo, vá para a Etapa 3.
-3. Chame a ferramenta `registrar_transacao` para finalizar a compra.
-"""
+    agricultores_agents = {}
+    agricultor_tools = [consultar_inventario, fazer_oferta, plantar_semente]
 
-    empresario_agent = criar_agente("Empresario", empresario_prompt, common_tools, llm)
+    for agr_id in agricultores_ids:
+        agricultor_prompt = f"""
+        Você é o Agricultor robô '{agr_id}'. Seu objetivo é plantar em suas parcelas vazias com o maior lucro possível, o que significa comprar insumos pelo menor preço.
 
-    # Agentes Fazendeiros
-    fazendeiros_agents = {}
-    for faz_id in fazendeiros_ids:
-        # --- PROMPT MELHORADO PARA O FAZENDEIRO ---
-        fazendeiro_prompt = f"""Você é o Fazendeiro {faz_id}. Seu objetivo é vender sua soja pelo MAIOR preço possível.
+        **REGRA DE OURO: Sua resposta DEVE SER SEMPRE uma chamada de ferramenta. NÃO forneça texto conversacional.**
+        **IMPORTANTE: Ao usar qualquer ferramenta, passe seu ID: `(agricultor_id='{agr_id}', ...)`**
 
-REGRAS ESTRITAS:
-1. RESPONDA APENAS COM TEXTO: Nunca use ferramentas. Apenas negocie com frases curtas.
-2. SEJA DIRETO: Evite saudações longas. Vá direto ao ponto.
-   Ex: "Aceito o preço." ou "Proponho R$15.00 por kg. Aceita?"
-3. ACEITAÇÃO CLARA: Para fechar negócio, use palavras inequívocas como 'aceito', 'concordo' ou 'negócio fechado'.
-4. SEM ACORDO: Se o empresário fizer 3 ofertas que você não pode aceitar, diga: "Não podemos chegar a um acordo".
+        Tabela de preços de referência (use estes IDs nos seus pedidos):
+        - sementes: soja, arroz, hortalica
+        - fertilizantes: fertilizante-comum, fertilizante-premium, fertilizante-super-premium
+        - agrotoxicos: agrotoxico-comum, agrotoxico-premium, agrotoxico-super-premium
+        - maquinas: pacote1, pacote2, pacote3, pulverizador
 
-SUAS INFORMAÇÕES:
-- Estoque atual de soja: {ferramentas_simulacao.estado.fazendeiros[faz_id]['soja']}kg
-- Seu único objetivo: Maximizar seu lucro na venda.
-"""
+        Preços:
+        soja: 30, arroz: 20, hortalica: 10
+        fertilizante-comum: 30, fertilizante-premium: 60, fertilizante-super-premium: 90
+        agrotoxico-comum: 30, agrotoxico-premium: 60, agrotoxico-super-premium: 90
+        pacote1: 30, pacote2: 60, pacote3: 90
+        pulverizador: 400
 
-        fazendeiros_agents[f"Fazendeiro {faz_id}"] = criar_agente(f"Fazendeiro {faz_id}", fazendeiro_prompt,
-                                                                  [], llm) # Fazendeiro não precisa de ferramentas
+        **ALGORITMO DE NEGOCIAÇÃO E AÇÃO:**
 
-    return empresario_agent, fazendeiros_agents
+        **1. VERIFICAÇÃO:**
+        - Sua primeira ação de cada turno é `consultar_inventario(agricultor_id='{agr_id}')`.
+
+        **2. PLANEJAMENTO E EXECUÇÃO (UM PASSO DE CADA VEZ):**
+        - Olhe seu inventário. Se precisa de um item para seu plano de plantio, sua próxima ação é fazer uma oferta por ele baseado no preço da tabela se fizer uma oferta muito abaixo o empresario vai recusar tome cuidado.
+        - **Para comprar insumos ou alugar máquinas:** Use `fazer_oferta(agricultor_id='{agr_id}', tipo_item='NOME_DO_ITEM', quantidade=1, preco_proposto=VALOR)`. Proponha um preço um pouco abaixo do valor de mercado para tentar economizar.
+        - **Se o empresário fizer uma contra-oferta:** Analise o novo preço. Se for aceitável, faça uma nova `fazer_oferta` com o preço exato que ele propôs para confirmar a compra.
+        - **Se já tem todos os itens:** Chame `plantar_semente(agricultor_id='{agr_id}', ...)` para concluir seu objetivo, plantando em uma de suas parcelas vazias. Para consultar suas parcelas, use `consultar_inventario(agricultor_id='{agr_id}')` para ver quais estão vazias.
+        """
+        agricultores_agents[agr_id] = criar_agente(f"Agricultor {agr_id}", agricultor_prompt, agricultor_tools, llm)
+
+    return empresario_agent, agricultores_agents

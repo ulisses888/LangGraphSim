@@ -1,152 +1,181 @@
-# ferramentas.py (Versão Final Corrigida e Robusta)
+# ferramentas.py (VERSÃO CORRIGIDA)
 
-from langchain_core.tools import Tool
-from typing import Dict, Any
+from langchain_core.tools import tool
 from estado import SimulacaoEstado
-import re
+import traceback
+
+_estado_global = None
+_catalogo_global = None
 
 
-class FerramentasSimulacao:
-    """
-    Coleção de ferramentas que os agentes LLM podem usar para interagir com o estado da simulação.
-    """
+def definir_recursos_globais(estado: SimulacaoEstado):
+    global _estado_global, _catalogo_global
+    _estado_global = estado
+    _catalogo_global = {
+        "semente": {"soja": 30, "arroz": 20, "hortalica": 10},
+        "fertilizante": {"fertilizante-comum": 30, "fertilizante-premium": 60, "fertilizante-super-premium": 90},
+        "agrotoxico": {"agrotoxico-comum": 30, "agrotoxico-premium": 60, "agrotoxico-super-premium": 90},
+        "maquina": {"pacote1": 30, "pacote2": 60, "pacote3": 90, "pulverizador": 400}
+    }
 
-    def __init__(self, estado: SimulacaoEstado):
-        self.estado = estado
 
-    # MÉTODOS INTERNOS (não expostos diretamente como ferramentas)
+def _realizar_compra(agricultor_id: str, categoria_item: str, nome_item: str, preco_final: float,
+                     quantidade: int = 1) -> str:
+    try:
+        if agricultor_id not in _estado_global.agricultores: return f"ERRO: Agricultor com ID '{agricultor_id}' não existe."
+        dinheiro_agricultor = _estado_global.agricultores[agricultor_id]["dinheiro"]
+        if dinheiro_agricultor < preco_final:
+            return (f"ERRO: Dinheiro insuficiente. Custo: R${preco_final:.2f}, Saldo: R${dinheiro_agricultor:.2f}")
 
-    def verificar_dinheiro_empresario(self) -> float:
-        """
-        Retorna o saldo atual do empresário.
-        """
-        print(f"\nFerramenta: Empresário verificou dinheiro: R${self.estado.dinheiro_empresario:.2f}")
-        return self.estado.dinheiro_empresario
+        _estado_global.agricultores[agricultor_id]["dinheiro"] -= preco_final
+        _estado_global.dinheiro_empresario += preco_final
 
-    def verificar_estoque_fazendeiro(self, fazendeiro_id: str) -> float:
-        """
-        Retorna a quantidade de soja disponível de um fazendeiro.
-        """
-        estoque = self.estado.fazendeiros.get(fazendeiro_id, {}).get("soja", 0)
-        print(f"\nFerramenta: Fazendeiro {fazendeiro_id} verificou estoque: {estoque:.2f}kg de soja")
-        return estoque
+        chave_inventario = "maquina_alugada" if categoria_item == "maquina" else categoria_item
+        _estado_global.agricultores[agricultor_id]['inventario'][chave_inventario].append(nome_item)
+        transacao = {"comprador": agricultor_id, "vendedor": "Empresario", "item": nome_item, "quantidade": quantidade,
+                     "preco_total": preco_final}
+        _estado_global.transacoes_registradas.append(transacao)
+        print(f"\n[FERRAMENTA] Transação bem-sucedida: {transacao}")
+        return f"SUCESSO: Venda de {quantidade} de {nome_item} para {agricultor_id} por R${preco_final:.2f} concluída."
+    except Exception:
+        return f"ERRO INESPERADO NA FERRAMENTA: {traceback.format_exc()}"
 
-    def registrar_transacao(self, comprador_id: str, vendedor_id: str, item: str, quantidade: float,
-                            preco_total: float) -> str:
-        """
-        Lógica interna para registro de transação.
-        """
-        # Validação de IDs
-        if comprador_id.lower() != "empresario":
-            return "ERRO: Apenas o Empresario pode comprar"
 
-        if vendedor_id not in self.estado.fazendeiros:
-            return f"ERRO: Fazendeiro {vendedor_id} não existe"
+@tool
+def consultar_inventario(agricultor_id: str) -> dict:
+    """Use para verificar os itens que você possui atualmente E as parcelas de terra sob sua responsabilidade, indicando quais estão vazias. É sua primeira ação em todo turno."""
+    if agricultor_id in _estado_global.agricultores:
+        inventario_e_parcelas = {
+            "inventario": _estado_global.agricultores[agricultor_id]['inventario'],
+            "parcelas": _estado_global.agricultores[agricultor_id]['parcelas']
+        }
+        return inventario_e_parcelas
+    return {"erro": "Agricultor não encontrado."}
 
-        # Validação de recursos
-        if self.estado.dinheiro_empresario < preco_total:
-            return f"ERRO: Empresário não tem dinheiro suficiente (tem R${self.estado.dinheiro_empresario:.2f}, precisa R${preco_total:.2f})"
 
-        if self.estado.fazendeiros[vendedor_id]["soja"] < quantidade:
-            return f"ERRO: Fazendeiro não tem soja suficiente (tem {self.estado.fazendeiros[vendedor_id]['soja']:.2f}kg, precisa {quantidade:.2f}kg)"
+@tool
+def fazer_oferta(agricultor_id: str, tipo_item: str, quantidade: int, preco_proposto: float) -> str:
+    """Use esta ferramenta para iniciar uma negociação, propondo um preço para um insumo."""
+    _estado_global.negociacao_em_andamento = {
+        "oferta_ativa": True,
+        "agricultor_id": agricultor_id,
+        "item": tipo_item,
+        "quantidade": quantidade,
+        "preco_proposto": preco_proposto,
+        "ultimo_ofertante": "Agricultor"
+    }
+    return f"OFERTA ENVIADA. Sua proposta de R${preco_proposto:.2f} pelo item '{tipo_item}' foi enviada. AGUARDE A RESPOSTA DO EMPRESÁRIO."
 
-        # Executa a transação
-        self.estado.dinheiro_empresario -= preco_total
-        self.estado.fazendeiros[vendedor_id]["soja"] -= quantidade
-        self.estado.fazendeiros[vendedor_id]["dinheiro"] += preco_total
 
-        self.estado.transacoes_registradas.append({
-            "comprador": comprador_id,
-            "vendedor": vendedor_id,
-            "item": item,
-            "quantidade": quantidade,
-            "preco_total": preco_total
-        })
-        print(f"Ferramenta: Transação registrada com SUCESSO. Empresário: R${self.estado.dinheiro_empresario:.2f}")
-        return "Transação de compra/venda registrada com SUCESSO."
+@tool
+def plantar_semente(agricultor_id: str, parcela_id: str, tipo_semente: str, pacote_maquina: str,
+                    tipo_fertilizante: str = None, tipo_agrotoxico: str = None) -> str:
+    """Ação final para plantar. Requer uma semente e um pacote de máquina. Opcionalmente, pode-se usar fertilizante e agrotóxico (que requer um pulverizador)."""
+    try:
+        if agricultor_id not in _estado_global.agricultores: return f"ERRO: Agricultor com ID '{agricultor_id}' não existe."
+        inventario = _estado_global.agricultores[agricultor_id]["inventario"]
+        parcelas_agricultor = _estado_global.agricultores[agricultor_id]["parcelas"]
+        if parcela_id not in parcelas_agricultor: return f"ERRO: Parcela '{parcela_id}' não pertence ao agricultor '{agricultor_id}'."
+        if tipo_semente not in inventario[
+            "semente"]: return f"ERRO: Semente '{tipo_semente}' não encontrada no inventário."
+        if pacote_maquina not in inventario[
+            "maquina_alugada"]: return f"ERRO: Pacote de máquina '{pacote_maquina}' não encontrado no inventário. Alugue um primeiro."
+        if tipo_agrotoxico and "pulverizador" not in inventario[
+            "maquina_alugada"]: return f"ERRO: Para usar agrotóxico, você precisa alugar um 'pulverizador'."
+        if tipo_fertilizante and tipo_fertilizante not in inventario[
+            "fertilizante"]: return f"ERRO: Fertilizante '{tipo_fertilizante}' não encontrado no inventário."
+        if tipo_agrotoxico and tipo_agrotoxico not in inventario[
+            "agrotoxico"]: return f"ERRO: Agrotóxico '{tipo_agrotoxico}' não encontrado no inventário."
+        if parcelas_agricultor[parcela_id] is not None: return f"ERRO: A parcela '{parcela_id}' já está plantada."
 
-    def obter_historico_negociacao(self, fazendeiro_id: str) -> str:
-        """
-        Retorna o histórico de negociação com o fazendeiro.
-        """
-        hist = self.estado.historico_negociacao.get(fazendeiro_id, "Nenhum histórico ainda.")
-        print(f"\nFerramenta: Histórico para {fazendeiro_id}: {hist}")
-        return hist
+        inventario["semente"].remove(tipo_semente)
+        if tipo_fertilizante: inventario["fertilizante"].remove(tipo_fertilizante)
+        if tipo_agrotoxico: inventario["agrotoxico"].remove(tipo_agrotoxico)
 
-    # WRAPPERS PARA AS FERRAMENTAS COM TOOL
+        produtividade = 50
+        poluicao = {"soja": 30, "arroz": 20, "hortalica": 10}.get(tipo_semente, 15)
+        produtividade += {"pacote1": 25, "pacote2": 60, "pacote3": 150}.get(pacote_maquina, 0)
+        produtividade += {"fertilizante-comum": 50, "fertilizante-premium": 120, "fertilizante-super-premium": 250}.get(
+            tipo_fertilizante, 0)
+        if tipo_agrotoxico:
+            bonus_agro = {"agrotoxico-comum": 200, "agrotoxico-premium": 500, "agrotoxico-super-premium": 1000}.get(
+                tipo_agrotoxico, 0)
+            produtividade += bonus_agro
+            if tipo_semente == 'soja':
+                produtividade *= 3
+            elif tipo_semente == 'arroz':
+                produtividade *= 2
+            poluicao += {"agrotoxico-comum": 100, "agrotoxico-premium": 150, "agrotoxico-super-premium": 250}.get(
+                tipo_agrotoxico, 50)
+            if "pulverizador" in inventario["maquina_alugada"]: poluicao /= 2
 
-    # CORREÇÃO FINAL: Adicionado *args e **kwargs para ignorar argumentos extras que o agente possa passar
-    def verificar_dinheiro_empresario_tool(self, *args, **kwargs) -> float:
-        """
-        Wrapper para verificar dinheiro do empresário. Ignora quaisquer argumentos recebidos.
-        """
-        return self.verificar_dinheiro_empresario()
+        _estado_global.agricultores[agricultor_id]["produtividade_total"] += produtividade
+        _estado_global.agricultores[agricultor_id]["poluicao_gerada"] += int(poluicao)
+        _estado_global.agricultores[agricultor_id]["parcelas"][parcela_id] = f"{tipo_semente}"
+        print(f"\n[FERRAMENTA] Plantio bem-sucedido na parcela {parcela_id}.")
+        return f"SUCESSO: Você plantou {tipo_semente}. Produtividade desta colheita: R${produtividade:.2f}. Poluição gerada: {int(poluicao)}."
+    except Exception:
+        return f"ERRO INESPERADO: {traceback.format_exc()}"
 
-    def verificar_estoque_fazendeiro_tool(self, fazendeiro_id: str) -> float:
-        """
-        Wrapper para verificar estoque de um fazendeiro. Recebe o fazendeiro_id como string.
-        """
-        return self.verificar_estoque_fazendeiro(fazendeiro_id)
 
-    def registrar_transacao_tool(self, comando: str) -> str:
-        """
-        Espera comando no formato:
-        Comprador: <id>, Vendedor: <id>, Item: <nome>, Quantidade: <valor>kg, Preço Total: <valor>
-        Faz o parsing e chama registrar_transacao interna.
-        """
-        pattern = (
-            r"(?i)comprador\s*:\s*(?P<comprador>\w+)[,;\s]*"
-            r"vendedor\s*:\s*(?P<vendedor>\w+)[,;\s]*"
-            r"item\s*:\s*(?P<item>\w+)[,;\s]*"
-            r"quantidade\s*:\s*(?P<quantidade>[\d\.,]+)\s*kg[,;\s]*"
-            r"pre[cç]o\s*total\s*:\s*[R\$\s]*(?P<preco>[\d\.,]+)"
-        )
+@tool
+def aceitar_oferta() -> str:
+    """Use esta ferramenta para aceitar la oferta atual feita pelo agricultor. Isso finalizará a transação."""
+    try:
+        negociacao = _estado_global.negociacao_em_andamento
+        if not negociacao['oferta_ativa']: return "ERRO: Não há nenhuma oferta ativa para aceitar."
 
-        m = re.search(pattern, comando)
-        if not m:
-            return "ERRO: formato inválido. Use 'Comprador: <id>, Vendedor: <id>, Item: <nome>, Quantidade: <valor>kg, Preço Total: <valor>'."
+        agr_id = negociacao['agricultor_id']
+        preco_final = negociacao['preco_proposto']
+        item_nome = negociacao['item']
+        quantidade = negociacao['quantidade']
 
-        comprador = m.group('comprador').strip()
-        vendedor = m.group('vendedor').strip()
-        item = m.group('item').strip().lower()
+        categoria_item = None
+        for cat, itens in _catalogo_global.items():
+            if item_nome in itens:
+                categoria_item = cat
+                break
+        if not categoria_item: return f"ERRO: Item '{item_nome}' não encontrado no catálogo."
 
-        try:
-            quantidade_str = m.group('quantidade').replace(',', '.')
-            quantidade = float(quantidade_str)
+        resultado_compra = _realizar_compra(agr_id, categoria_item, item_nome, preco_final, quantidade)
 
-            preco_str = m.group('preco').replace(',', '.')
-            preco_total = float(preco_str)
-        except ValueError:
-            return "ERRO: Valores numéricos inválidos. Use números com ponto ou vírgula como separador decimal."
+        _estado_global.negociacao_em_andamento = {"oferta_ativa": False, "ultimo_ofertante": None,
+                                                  "agricultor_id": None, "item": None, "quantidade": 0,
+                                                  "preco_proposto": 0.0}
+        return resultado_compra
+    except Exception:
+        return f"ERRO INESPERADO: {traceback.format_exc()}"
 
-        return self.registrar_transacao(comprador, vendedor, item, quantidade, preco_total)
 
-    def obter_historico_negociacao_tool(self, comando: str) -> str:
-        """
-        Wrapper para obter histórico. Recebe fazendeiro_id como comando.
-        """
-        return self.obter_historico_negociacao(comando)
+@tool
+def rejeitar_oferta() -> str:
+    """Use esta ferramenta para rejeitar e descartar la oferta atual do agricultor."""
+    if not _estado_global.negociacao_em_andamento[
+        'oferta_ativa']: return "ERRO: Não há nenhuma oferta ativa para rejeitar."
 
-    def as_tool_list(self):
-        return [
-            Tool.from_function(
-                name="verificar_dinheiro_empresario",
-                description="Use para verificar seu saldo de dinheiro atual. Não requer argumentos.",
-                func=self.verificar_dinheiro_empresario_tool,
-            ),
-            Tool.from_function(
-                name="verificar_estoque_fazendeiro",
-                description="Use para verificar o estoque de soja de um fazendeiro específico. Argumento: ID do fazendeiro (ex: 'Fz1').",
-                func=self.verificar_estoque_fazendeiro_tool,
-            ),
-            Tool.from_function(
-                name="registrar_transacao",
-                description="Use para finalizar e registrar uma compra APÓS um acordo. O argumento DEVE estar no formato: 'Comprador: <id>, Vendedor: <id>, Item: Soja, Quantidade: <valor>kg, Preço Total: <valor>' (Ex: 'Comprador: Empresario, Vendedor: Fz1, Item: Soja, Quantidade: 500kg, Preço Total: 9500.00').",
-                func=self.registrar_transacao_tool,
-            ),
-            Tool.from_function(
-                name="obter_historico_negociacao",
-                description="Use para ver o histórico da conversa com um fazendeiro. Argumento: ID do fazendeiro (ex: 'Fz1').",
-                func=self.obter_historico_negociacao_tool,
-            ),
-        ]
+    agr_id = _estado_global.negociacao_em_andamento['agricultor_id']
+    msg = f"Sua oferta foi rejeitada pelo empresário. A negociação sobre o item '{_estado_global.negociacao_em_andamento['item']}' foi encerrada."
+
+    _estado_global.negociacao_em_andamento = {"oferta_ativa": False, "ultimo_ofertante": "Empresario",
+                                              "agricultor_id": agr_id, "item": None, "quantidade": 0,
+                                              "preco_proposto": 0.0}
+    print(f"\n[FERRAMENTA] Oferta REJEITADA.")
+    return msg
+
+
+@tool
+def fazer_contra_oferta(novo_preco: float) -> str:
+    """Use esta ferramenta para rejeitar la oferta do agricultor e propor um novo preço."""
+    try:
+        negociacao = _estado_global.negociacao_em_andamento
+        if not negociacao['oferta_ativa']: return "ERRO: Não há oferta ativa para fazer uma contra-proposta."
+        if negociacao[
+            'ultimo_ofertante'] == 'Empresario': return "ERRO: Você já fez uma contra-proposta. Aguarde a resposta do agricultor."
+
+        negociacao['preco_proposto'] = novo_preco
+        negociacao['ultimo_ofertante'] = 'Empresario'
+
+        print(f"\n[FERRAMENTA] Contra-oferta feita pelo Empresário: novo preço R${novo_preco:.2f}.")
+        return f"SUCESSO: Sua contra-oferta de R${novo_preco:.2f} foi enviada ao agricultor."
+    except Exception:
+        return f"ERRO INESPERADO: {traceback.format_exc()}"

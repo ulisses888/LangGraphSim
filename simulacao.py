@@ -1,220 +1,162 @@
-# simulacao.py (Corrigido)
+# simulacao.py (VERSÃO CORRIGIDA)
 
 from langgraph.graph import StateGraph, END
 from agentes import inicializar_agentes
 from estado import SimulacaoEstado
-from ferramentas import FerramentasSimulacao
+from ferramentas import definir_recursos_globais
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 import re
-
-# --- Configuração do LLM ---
-llm = ChatOpenAI(
-    model="local-model",
-    openai_api_base="http://localhost:1234/v1",
-    temperature=0.7,
-    api_key="lm-studio"
-)
+import sys
 
 
-# --- Definição do Estado do Grafo ---
+class Tee:
+    def __init__(self, *files):
+        self.files = files
+
+    def write(self, obj):
+        for f in self.files: f.write(obj); f.flush()
+
+    def flush(self):
+        for f in self.files: f.flush()
+
+
+llm = ChatOpenAI(model="local-model", openai_api_base="http://localhost:1234/v1", temperature=0.0, api_key="lm-studio")
+
+
 class GraphState(dict):
     messages: list[BaseMessage]
-    next_fazendeiro_idx: int
-    current_fazendeiro_id: str
+    next_agricultor_idx: int
+    current_agricultor_id: str
     simulacao_estado: SimulacaoEstado
     negociacao_ativa: bool
     next_action: str = ""
-    iteracoes_negociacao: int = 0  # Contador de iterações por negociação
+    iteracoes_negociacao: int = 0
 
 
-# --- Função Auxiliar para Limpar Saída ---
 def _limpar_saida_agente(texto_original: str) -> str:
-    """Remove o bloco de pensamento <think> da saída do agente, retornando apenas a resposta final."""
     match = re.search(r"</think>(.*)", texto_original, re.DOTALL)
-    if match:
-        # Pega o texto após a última tag </think> e remove espaços em branco
-        return match.group(1).strip()
+    if match: return match.group(1).strip()
     return texto_original.strip()
 
 
-# --- Funções dos Nós do Grafo ---
-
 def empresario_node(state: GraphState):
     sim_estado = state["simulacao_estado"]
-    faz_id = state["current_fazendeiro_id"]
-
+    agr_id = state["current_agricultor_id"]
+    oferta = sim_estado.negociacao_em_andamento
     input_text = (
-        f"Sua vez de negociar com o Fazendeiro {faz_id}. "
-        f"Lembre-se: você tem R${sim_estado.dinheiro_empresario:.2f} e ele tem {sim_estado.fazendeiros[faz_id]['soja']:.2f}kg."
-    )
+        f"Sua vez de negociar com o Agricultor '{agr_id}'. A oferta atual é: {oferta}. Avalie e decida (aceitar, rejeitar, ou contrapropor).")
+
     executor = agentes["Empresario"]
-    result = executor.invoke({
-        "input": input_text,
-        "chat_history": state["messages"]
-    })
-    # Limpa a saída antes de adicionar ao histórico
+    result = executor.invoke({"input": input_text, "chat_history": state["messages"]})
     resp_limpa = _limpar_saida_agente(result.get("output", ""))
+
     state["messages"].append(AIMessage(content=resp_limpa, name="Empresario"))
-
-    # Log detalhado
-    print(f"\n[EMPRESARIO] Iteração: {state['iteracoes_negociacao']}")
-    print(f"Entrada: {input_text[:100]}...")
-    print(f"Saída: {resp_limpa[:100]}...")
-
+    print(f"\n[EMPRESARIO] Responde para {agr_id}: {resp_limpa}")
     return state
 
 
-def fazendeiro_node(state: GraphState):
-    sim_estado = state["simulacao_estado"]
-    faz_id = state["current_fazendeiro_id"]
+def agricultor_node(state: GraphState):
+    agr_id = state["current_agricultor_id"]
+    last_message = state["messages"][-1].content if state["messages"] else "Nenhuma mensagem anterior."
 
-    last_message = state["messages"][-1].content
     input_text = (
-        f"O empresário disse: '{last_message}'. Responda como Fazendeiro {faz_id}. "
-        f"Lembre-se: você tem {sim_estado.fazendeiros[faz_id]['soja']:.2f}kg."
-    )
-    executor = agentes[f"Fazendeiro {faz_id}"]
-    result = executor.invoke({
-        "input": input_text,
-        "chat_history": state["messages"]
-    })
-    # Limpa a saída antes de adicionar ao histórico
+        f"O empresário respondeu: '{last_message}'.\nSiga seu algoritmo. Verifique seu inventário, seu plano, e decida sua próxima ação: fazer uma oferta, plantar, ou responder a uma contra-proposta.")
+
+    executor = agentes["Agricultores"][agr_id]
+    result = executor.invoke({"input": input_text, "chat_history": state["messages"]})
     resp_limpa = _limpar_saida_agente(result.get("output", ""))
-    state["messages"].append(AIMessage(content=resp_limpa, name=faz_id))
 
-    # Log detalhado
-    print(f"\n[FAZENDEIRO {faz_id}] Iteração: {state['iteracoes_negociacao']}")
-    print(f"Entrada: {input_text[:100]}...")
-    print(f"Saída: {resp_limpa[:100]}...")
-
+    state["messages"].append(AIMessage(content=resp_limpa, name=f"Agricultor {agr_id}"))
+    print(f"\n[AGRICULTOR {agr_id}] Ação/Resposta: {resp_limpa}")
     return state
 
 
 def decide_proxima_acao(state: GraphState):
-    # CORREÇÃO: Contador de iteração é simplesmente incrementado.
+    print(state["simulacao_estado"])
     state["iteracoes_negociacao"] += 1
-    print(f"\n[DECISÃO] Iteração: {state['iteracoes_negociacao']}")
+    print(f"\n[DECISÃO] Fim da iteração: {state['iteracoes_negociacao']}")
 
-    # Verificar limite de iterações
     if state["iteracoes_negociacao"] > 10:
-        print(f"--- Limite de iterações excedido com {state['current_fazendeiro_id']} ---")
-        state["negociacao_ativa"] = False
+        print(f"--- FIM DA NEGOCIAÇÃO: Limite de iterações excedido com {state['current_agricultor_id']} ---")
         state["next_action"] = "finalizar_ou_proximo"
-        state["iteracoes_negociacao"] = 0  # Reseta para a próxima negociação
         return state
 
-    last_agent_message = ""
-    # Garante que a mensagem seja uma string antes de chamar .lower()
-    if state["messages"] and isinstance(state["messages"][-1], AIMessage):
-        last_agent_message = state["messages"][-1].content.lower()
-
-    if "transação de compra/venda registrada com sucesso" in last_agent_message:
-        print(f"--- Transação concluída! ---")
-        state["negociacao_ativa"] = False
-        state["next_action"] = "finalizar_ou_proximo"
-    elif "desisto da negociação" in last_agent_message:
-        print(f"--- Desistência de negociação. ---")
-        state["negociacao_ativa"] = False
-        state["next_action"] = "finalizar_ou_proximo"
-    else:
-        last_sender = state["messages"][-1].name
-        if last_sender == "Empresario":
-            state["next_action"] = "resposta_fazendeiro"
-        else:
+    negociacao = state["simulacao_estado"].negociacao_em_andamento
+    if negociacao['oferta_ativa']:
+        if negociacao['ultimo_ofertante'] == 'Agricultor':
             state["next_action"] = "resposta_empresario"
+        else:
+            state["next_action"] = "resposta_agricultor"
+    else:
+        state["next_action"] = "resposta_agricultor"
 
-    print(f"Próxima ação: {state['next_action']}")
+    print(f"Próxima ação definida: {state['next_action']}")
     return state
 
 
-def verificar_proximo_fazendeiro(state: GraphState):
+def verificar_proximo_agricultor(state: GraphState):
     sim_estado = state["simulacao_estado"]
-    ids = list(sim_estado.fazendeiros.keys())
-    idx = state["next_fazendeiro_idx"]
-
-    if idx < len(ids):
-        curr = ids[idx]
-        print(f"\n--- Iniciando negociação com {curr} ({idx + 1}/{len(ids)}) ---")
-        initial_message = HumanMessage(content=f"Iniciando negociação com {curr}")
-        return {
-            "messages": [initial_message],
-            "next_fazendeiro_idx": idx + 1,
-            "current_fazendeiro_id": curr,
-            "simulacao_estado": sim_estado,
-            "negociacao_ativa": True,
-            "next_action": "iniciar_negociacao",
-            "iteracoes_negociacao": 0,  # Reset do contador para a nova negociação
-        }
+    ids_agricultores = list(sim_estado.agricultores.keys())
+    idx = state["next_agricultor_idx"]
+    if idx < len(ids_agricultores):
+        curr_id = ids_agricultores[idx]
+        print(f"\n\n--- INICIANDO NOVA NEGOCIAÇÃO COM AGRICULTOR: {curr_id} ---")
+        initial_message = HumanMessage(content=f"Olá, Agricultor {curr_id}. Sou o Empresário. O que você precisa hoje?")
+        return {"messages": [initial_message], "next_agricultor_idx": idx + 1, "current_agricultor_id": curr_id,
+                "simulacao_estado": sim_estado, "next_action": "iniciar_negociacao", "iteracoes_negociacao": 0}
     else:
+        print("\n--- TODOS OS AGRICULTORES JÁ NEGOCIARAM. ---")
         return {"next_action": "fim"}
 
 
-# --- Inicialização ---
-est_inicial = SimulacaoEstado(
-    dinheiro_empresario_inicial=10000.0,
-    fazendeiros_info={"Fz1": {"soja": 500.0, "dinheiro": 0.0}, "Fz2": {"soja": 700.0, "dinheiro": 0.0},
-                      "Fz3": {"soja": 300.0, "dinheiro": 0.0}}
-)
-ferramentas = FerramentasSimulacao(est_inicial)
-agentes = {}
-emp_ag, faz_ag = inicializar_agentes(ferramentas, llm, list(est_inicial.fazendeiros.keys()))
-agentes["Empresario"] = emp_ag
-agentes.update(faz_ag)
-
-# --- Configuração do Grafo ---
-workflow = StateGraph(GraphState)
-workflow.add_node("verificar_proximo_fazendeiro", verificar_proximo_fazendeiro)
-workflow.add_node("empresario_node", empresario_node)
-workflow.add_node("fazendeiro_node", fazendeiro_node)
-workflow.add_node("decide_proxima_acao", decide_proxima_acao)
-
-workflow.set_entry_point("verificar_proximo_fazendeiro")
-
-# Transições
-workflow.add_conditional_edges(
-    "verificar_proximo_fazendeiro",
-    lambda state: state["next_action"],
-    {"iniciar_negociacao": "empresario_node", "fim": END}
-)
-workflow.add_edge("empresario_node", "decide_proxima_acao")
-workflow.add_edge("fazendeiro_node", "decide_proxima_acao")
-workflow.add_conditional_edges(
-    "decide_proxima_acao",
-    lambda state: state["next_action"],
-    {"resposta_empresario": "empresario_node", "resposta_fazendeiro": "fazendeiro_node",
-     "finalizar_ou_proximo": "verificar_proximo_fazendeiro"}
-)
-
-app = workflow.compile(checkpointer=None)
-
-# --- Execução ---
-print("--- Iniciando Simulação de Negociação ---")
-print(est_inicial)
-
-# --- Estado inicial ---
-initial_graph_state = {
-    "next_fazendeiro_idx": 0,
-    "simulacao_estado": est_inicial,
-    "messages": [],
-    "iteracoes_negociacao": 0,
-}
-
-# Loop de execução com tratamento de erros
+original_stdout = sys.stdout
+log_file = open("simulacao_log.txt", "w", encoding="utf-8")
+sys.stdout = Tee(original_stdout, log_file)
 try:
-    for s in app.stream(initial_graph_state, config={'recursion_limit': 100}):
-        if "__end__" in s:
-            break
+    agricultores_config = {"Agr1": {"dinheiro": 6000.0, "parcelas": ["P1", "P2", "P3"]},
+                           "Agr2": {"dinheiro": 8000.0, "parcelas": ["T1", "T2"]}}
+    est_inicial = SimulacaoEstado(dinheiro_empresario_inicial=10000.0, agricultores_info=agricultores_config)
+    definir_recursos_globais(est_inicial)
 
-        # Tratamento de erros críticos
-        current_state = s[list(s.keys())[0]]
-        if current_state and "error" in current_state:
-            print(f"ERRO CRÍTICO: {current_state['error']}")
-            print("Reiniciando negociação com próximo fazendeiro...")
-            current_state["next_action"] = "finalizar_ou_proximo"
+    agentes = {}
+    emp_ag, agr_ags = inicializar_agentes(llm, list(est_inicial.agricultores.keys()))
+    agentes["Empresario"] = emp_ag
+    agentes["Agricultores"] = agr_ags
+
+    workflow = StateGraph(GraphState)
+    workflow.add_node("verificar_proximo_agricultor", verificar_proximo_agricultor)
+    workflow.add_node("empresario_node", empresario_node)
+    workflow.add_node("agricultor_node", agricultor_node)
+    workflow.add_node("decide_proxima_acao", decide_proxima_acao)
+    workflow.set_entry_point("verificar_proximo_agricultor")
+
+    workflow.add_conditional_edges("verificar_proximo_agricultor", lambda state: state["next_action"],
+                                   {"iniciar_negociacao": "agricultor_node", "fim": END})
+
+    workflow.add_edge("empresario_node", "decide_proxima_acao")
+    workflow.add_edge("agricultor_node", "decide_proxima_acao")
+
+    workflow.add_conditional_edges("decide_proxima_acao", lambda state: state["next_action"],
+                                   {"resposta_empresario": "empresario_node",
+                                    "resposta_agricultor": "agricultor_node",
+                                    "finalizar_ou_proximo": "verificar_proximo_agricultor"})
+
+    app = workflow.compile(checkpointer=None)
+    print("--- INICIANDO SIMULAÇÃO DE NEGOCIAÇÃO (MODELO GORIM) ---")
+    print(est_inicial)
+
+    initial_graph_state = {"next_agricultor_idx": 0, "simulacao_estado": est_inicial, "messages": [],
+                           "iteracoes_negociacao": 0}
+
+    for s in app.stream(initial_graph_state, config={'recursion_limit': 150}):
+        if "__end__" in s: break
 except Exception as e:
-    print(f"ERRO GRAVE: {str(e)}")
+    print(f"\nERRO GRAVE NA EXECUÇÃO DO GRAFO: {str(e)}")
     print("Finalizando simulação prematuramente...")
-
-print("\n--- Fim da Simulação ---")
-print(est_inicial)
+finally:
+    print("\n--- FIM DA SIMULAÇÃO ---")
+    print(est_inicial)
+    sys.stdout = original_stdout
+    log_file.close()
+    print("\nLog da simulação salvo em 'simulacao_log.txt'")
